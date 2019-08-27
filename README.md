@@ -6,3 +6,7 @@ This branch wraps up the Karmed class which contains:
   - KarmedNonStationary
   
   Both are tested and ok.
+  
+  feature/0.ucb
+    - Contains the upper confidence bound action selection method for 
+      the stationary problems
