@@ -22,6 +22,7 @@ class Karmed(object):
         self.iter_per_run = 0
         self.epsilon = 0
         self.iter_values = []
+        self.iter_idxs = []
         
 
     def setTrainParams(self, iter_per_run, epsilon):
@@ -31,6 +32,7 @@ class Karmed(object):
         self.iter_per_run = iter_per_run
         self.epsilon = epsilon
         self.iter_values = np.zeros(iter_per_run)
+        self.iter_idxs = np.zeros(iter_per_run)
 
 
     def setRandomNoise(self, mu, sigma):
@@ -48,6 +50,17 @@ class Karmed(object):
             exp_decay_sum += self.alpha*((1 - self.alpha)**(self.act_selections[action_index] - i))*reward
             i += 1
         return ((1-self.alpha)**self.act_selections[action_index])*init_estimates[action_index] + exp_decay_sum
+
+
+    def _ucbSelection(self, estimates, t, act_selections):
+        ucb = []
+        i = 0
+        for estimate in estimates:
+            if act_selections[i] == 0:
+                return i
+            ucb.append(estimate + self.c*math.sqrt(math.log(t)/act_selections[i]))
+            i += 1
+        return np.argmax(ucb)
 
 
     @abstractmethod
@@ -72,17 +85,6 @@ class KarmedStationary(Karmed):
         self.ucb_as = ucb_params[0]
         self.c = ucb_params[1]
         Karmed.__init__(self, arms, mus, sigmas, initial_reward_values)
-
-
-    def __ucbSelection(self, estimates, t, act_selections):
-        ucb = []
-        i = 0
-        for estimate in estimates:
-            if act_selections[i] == 0:
-                return i
-            ucb.append(estimate + self.c*math.sqrt(math.log(t)/act_selections[i]))
-            i += 1
-        return np.argmax(ucb)
     
     
     def run(self):
@@ -90,7 +92,7 @@ class KarmedStationary(Karmed):
             if (np.random.uniform(0, 1) <= self.epsilon):
                 # Exploring
                 if self.ucb_as == True:
-                    index = self.__ucbSelection(self.estimated_rewards, iteration, self.act_selections)
+                    index = self._ucbSelection(self.estimated_rewards, iteration, self.act_selections)
                 else:
                     index = np.random.randint(0, self.estimated_rewards.shape[0])
             else:
@@ -103,10 +105,11 @@ class KarmedStationary(Karmed):
                     index = index[0]
             
             self.act_selections[index] += 1
+            self.iter_idxs[iteration] = index
             self.iter_values[iteration] = self.leverages[index].pull()
             self.estimated_rewards[index] += self._stationaryEstimates(iteration, index)
         
-        return self.iter_values, self.estimated_rewards
+        return self.iter_values, self.estimated_rewards, self.iter_idxs
 
     
 class KarmedNonStationary(Karmed):
@@ -145,6 +148,7 @@ class KarmedNonStationary(Karmed):
 
             # update number of leverage selection
             self.act_selections[index] += 1
+            self.iter_idxs[iteration] = index
             # get reward
             self.iter_values[iteration] = self.leverages[index].pull()
             # append reward for estimates update and update formula
@@ -157,7 +161,7 @@ class KarmedNonStationary(Karmed):
                 noise = self.noise.pull()
                 leverage.setMu(orig_mu+noise)
         
-        return self.iter_values, self.estimated_rewards, self.leverages
+        return self.iter_values, self.estimated_rewards, self.leverages, self.iter_idxs
 
 
 class KarmedGradient(Karmed):
@@ -176,9 +180,50 @@ class KarmedGradient(Karmed):
         Call setRandomNoise if problem is non-stationary to set gaussian noise
         '''
 
+        self.preferences = np.zeros(arms)
+        self.sel_probs = np.zeros(arms)
+        self.arms = arms
         self.alpha = alpha
         self.rewardsMat = [[] for i in range(arms)]
+        self.mode = stationarity
         Karmed.__init__(self, arms, mus, sigmas, initial_reward_values)
+
+
+    def run(self):
+        init_estimates = copy.deepcopy(self.estimated_rewards)
+        for iteration in range(self.iter_per_run):
+            # action selection
+            denom = 0
+            for i in range(self.arms):
+                denom += math.exp(self.preferences[i])
+            for i in range(self.arms):
+                self.sel_probs[i] = math.exp(self.preferences[i])/denom
+
+            index = np.random.choice(range(self.arms), 1, p=self.sel_probs)[0]
+
+            # update number of leverage selection
+            self.act_selections[index] += 1
+            self.iter_idxs[iteration] = index
+            # get reward
+            self.iter_values[iteration] = self.leverages[index].pull()
+
+            # estimates predictions update stationary vs non-stationary
+            if self.mode == 'stat':
+                self.estimated_rewards[index] += self._stationaryEstimates(iteration, index)
+            else:
+                self.rewardsMat[index].append(self.iter_values[iteration])
+                self.estimated_rewards[index] = self._nonStationaryEstimates(index, init_estimates)
+
+            # gradient-ascent preferences update
+            self.preferences[index] += self.alpha*(self.iter_values[iteration] - self.estimated_rewards[index])*(1 - self.sel_probs[index]) 
+            for i in range(self.arms):
+                if i != index:
+                    self.preferences[i] -= self.alpha*(self.iter_values[iteration] - self.estimated_rewards[i])*self.sel_probs[i]
+
+        return self.iter_values, self.estimated_rewards, self.leverages, self.iter_idxs
+
+            
+
 
                         
 
